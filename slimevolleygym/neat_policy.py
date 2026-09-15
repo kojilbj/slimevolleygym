@@ -19,4 +19,18 @@ class NeatPolicy:
 
   def predict(self, obs):
     output = self.net.activate(obs)
-    return np.array([1 if o > 0.5 else 0 for o in output])
+    forward = 1 if output[0] > 0.5 else 0
+    backward = 1 if output[1] > 0.5 else 0
+    jump = 1 if output[2] > 0.5 else 0
+    if forward and backward:
+      # Agent.setAction (slimevolley.py) treats forward=1 AND backward=1
+      # as "stand still" -- it silently cancels any intended movement.
+      # The 3 outputs are thresholded independently, so nothing stops a
+      # genome from firing both; break the tie by keeping whichever raw
+      # signal is stronger instead of letting them cancel out (see
+      # training_scripts/neat/EXPERIMENT_LOG.md, run 9 postmortem).
+      if output[0] >= output[1]:
+        backward = 0
+      else:
+        forward = 0
+    return np.array([forward, backward, jump])

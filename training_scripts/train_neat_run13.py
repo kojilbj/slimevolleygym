@@ -1,6 +1,19 @@
 # Trains an agent using NEAT (neat-python), evolving both the topology and
 # weights of a small feedforward network.
 #
+# Run 13: fix single-species genetic drift. Run 11 (this same file, at
+# logdir "neat_run11_full") stayed in one species for 467+ generations
+# and its best fitness clearly trended down over time (not just
+# plateaued) -- see neat_config_selfplay_v7.txt's header comment for the
+# measurements. Resumes run 11 from its generation-770 checkpoint (not
+# from scratch -- that population's actual progress is real, just
+# undiversified) under neat_config_selfplay_v7.txt's much lower
+# compatibility_threshold (1.6, empirically calibrated against that
+# checkpoint's live population), with an explicit re-speciate call
+# afterward. Also reconstructs the self-play archive as it would have
+# looked at that point (TrackingPolicy seed + the last 9 champions
+# actually produced by run 11), rather than starting the archive over.
+#
 # Run 5: self-play curriculum, v2. Run 4's self-play (see
 # neat/EXPERIMENT_LOG.md) produced 172 clean "dethronings" but the final
 # champion turned out to have NO functional path from its 12 observation
@@ -77,6 +90,7 @@
 # always have at least one enabled path to an output, applied fresh
 # every generation in eval_genomes.
 
+import glob
 import os
 import pickle
 import random
@@ -92,7 +106,7 @@ from slimevolleygym.neat_policy import NeatPolicy
 
 # Settings
 random_seed = 612
-n_generations = 5000
+n_generations = 4230       # resuming from generation 770 -> reaches 5000 total
 save_freq = 10
 n_rollouts = 3             # per-genome fitness rollouts, vs opponents sampled from the archive
 n_challenge_rollouts = 20  # rollouts used to decide whether to dethrone
@@ -101,9 +115,12 @@ archive_max_size = 10      # keep the seed + up to this many past champions
 complexity_penalty = 0.01  # subtracted per genome node, to directly select against bloat
 
 local_dir = os.path.dirname(__file__)
-config_path = os.path.join(local_dir, "neat_config_selfplay_v6.txt")
+config_path = os.path.join(local_dir, "neat_config_selfplay_v7.txt")
 
-logdir = "neat_run11_full"
+resume_checkpoint = os.path.join(local_dir, "neat_run11_full", "checkpoint-770")
+resume_logdir = os.path.join(local_dir, "neat_run11_full")  # where run 11's champion_*.pkl files live
+
+logdir = "neat_run13_full"
 if not os.path.exists(logdir):
   os.makedirs(logdir)
 
@@ -175,6 +192,20 @@ class OpponentArchive:
   def __init__(self):
     self.archive = [TrackingPolicy()]
     self.generation = 0
+
+  def resume_from(self, resume_logdir, config):
+    """ Reconstruct the archive as it would have looked when the run
+    being resumed left off -- load the champions it actually produced
+    instead of starting the self-play archive over from just the seed
+    (see neat/EXPERIMENT_LOG.md, run 13). """
+    champion_files = sorted(glob.glob(os.path.join(resume_logdir, "champion_*.pkl")))
+    self.generation = len(champion_files)  # total dethronings so far, for future filenames
+    for path in champion_files[-(archive_max_size - 1):]:
+      with open(path, "rb") as f:
+        genome = pickle.load(f)
+      self.archive.append(NeatPolicy(genome, config))
+    print(f"RESUME: loaded {len(self.archive) - 1} past champions into the archive "
+          f"(of {self.generation} ever produced)")
 
   def sample(self):
     return random.choice(self.archive)
@@ -283,7 +314,25 @@ def run():
       config_path,
   )
 
-  population = neat.Population(config)
+  archive.resume_from(resume_logdir, config)
+
+  # Resume run 11's actual population (real progress, just
+  # undiversified) under the new, much lower compatibility_threshold.
+  # restore_checkpoint keeps the OLD species-set object, whose single
+  # existing species still has a representative genome from before --
+  # NEAT's speciate() only compares against *existing* representatives
+  # and opens a new species when nothing matches, so reusing that stale
+  # single-species object reproduced only 1 species even at the new
+  # threshold. Replacing it with a brand-new, empty DefaultSpeciesSet
+  # before speciating (exactly how this was calibrated/tested
+  # beforehand) makes it split for real.
+  population = neat.Checkpointer.restore_checkpoint(resume_checkpoint, new_config=config)
+  population.species = neat.DefaultSpeciesSet(config.species_set_config, population.reporters)
+  population.species.speciate(config, population.population, population.generation)
+  print(f"RESUME: restored generation {population.generation} from {resume_checkpoint}, "
+        f"re-speciated into {len(population.species.species)} species under "
+        f"compatibility_threshold={config.species_set_config.compatibility_threshold}")
+
   population.add_reporter(neat.StdOutReporter(True))
   stats = neat.StatisticsReporter()
   population.add_reporter(stats)

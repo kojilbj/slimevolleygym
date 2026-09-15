@@ -1,0 +1,125 @@
+#--- configuration for NEAT self-play on SlimeVolley-v0 (run 5, v4) ---#
+# v4: v3's 100-generation trial (neat_run5b/) had all 3 outputs finally
+# reacting to *something*, but a direct probe (holding all inputs at 0
+# and sweeping one at a time) showed bx (ball x-position) and the
+# agent's own x-position had ZERO enabled outgoing connections -- the
+# single most important signal for chasing the ball horizontally had
+# been fully deleted from the genome, not just disabled. That's the
+# "doesn't react to the ball" behavior visible on screen.
+# Deletion is effectively irreversible (the connection gene is gone;
+# it would need conn_add_prob to re-roll that exact same pair by luck),
+# whereas disabling (enabled=False) is reversible via
+# enabled_mutate_rate. So push delete rates much lower and let
+# "enabled" toggling do the work of temporarily silencing a connection
+# instead of destroying it:
+#   - conn_delete_prob  0.2  -> 0.05
+#   - node_delete_prob  0.1  -> 0.02
+# Based on neat_config_selfplay.txt (run 4), with changes made after
+# finding run 4's "best" genome had no functional path from any of the
+# 12 observation inputs to its outputs -- it just output a fixed action
+# regardless of input (see neat/EXPERIMENT_LOG.md, run 4 postmortem):
+#   - conn_delete_prob  0.5 -> 0.2
+#   - node_delete_prob  0.2 -> 0.1
+# Run 4 likely lost its sensory pathways to random deletion (NEAT's
+# mutate_add_node splits a connection and disables the original; if the
+# new incoming half is later deleted, the new node -- and anything
+# downstream of it -- becomes permanently cut off from the inputs).
+# Lowering deletion rates relative to the add rates should let
+# input-to-output pathways survive long enough for selection to act on
+# them, instead of being pruned away before they matter.
+#
+# v3: a 100-generation trial of the above (neat_run5/) still had 2 of 3
+# outputs saturated at a constant 0 or 1 regardless of input (visually:
+# the agent walked straight into the net and never jumped). Root cause:
+# neat-python's sigmoid is sigmoid(5*z) -- 5x steeper than standard --
+# so even a bias of about +-1 is enough to saturate a node's output
+# independent of any weighted input. With bias_init_stdev=1.0 and
+# bias_max_value=30, biases can trivially dominate before evolution
+# finds a useful input-weight pattern. Fix: keep biases closer to zero
+# and change more slowly, so weighted inputs have room to actually swing
+# the output:
+#   - bias_init_stdev   1.0 -> 0.5
+#   - bias_mutate_power 0.5 -> 0.2
+#   - bias_max_value    30.0 -> 5.0
+#   - bias_min_value    -30.0 -> -5.0
+
+[NEAT]
+fitness_criterion       = max
+fitness_threshold        = 5.0
+no_fitness_termination = True
+pop_size               = 128
+reset_on_extinction    = True
+
+[DefaultGenome]
+# node activation options
+activation_default      = sigmoid
+activation_mutate_rate  = 0.0
+activation_options      = sigmoid
+
+# node aggregation options
+aggregation_default     = sum
+aggregation_mutate_rate = 0.0
+aggregation_options     = sum
+
+# node bias options
+bias_init_mean          = 0.0
+bias_init_stdev         = 0.5
+bias_max_value          = 5.0
+bias_min_value          = -5.0
+bias_mutate_power       = 0.2
+bias_mutate_rate        = 0.7
+bias_replace_rate       = 0.1
+
+# genome compatibility options
+compatibility_disjoint_coefficient = 1.0
+compatibility_weight_coefficient   = 0.5
+
+# connection add/remove rates
+conn_add_prob           = 0.5
+conn_delete_prob        = 0.05
+
+# connection enable options
+enabled_default         = True
+enabled_mutate_rate     = 0.01
+
+feed_forward            = True
+initial_connection      = full
+
+# node add/remove rates
+node_add_prob            = 0.2
+node_delete_prob         = 0.02
+
+# network parameters
+num_hidden               = 0
+num_inputs                = 12
+num_outputs                = 3
+
+# node response options
+response_init_mean      = 1.0
+response_init_stdev     = 0.0
+response_max_value      = 30.0
+response_min_value      = -30.0
+response_mutate_power   = 0.0
+response_mutate_rate    = 0.0
+response_replace_rate   = 0.0
+
+# connection weight options
+weight_init_mean         = 0.0
+weight_init_stdev        = 1.0
+weight_max_value         = 30
+weight_min_value         = -30
+weight_mutate_power      = 0.5
+weight_mutate_rate       = 0.8
+weight_replace_rate      = 0.1
+
+[DefaultSpeciesSet]
+compatibility_threshold = 3.0
+
+[DefaultStagnation]
+species_fitness_func = max
+max_stagnation       = 20
+species_elitism      = 2
+
+[DefaultReproduction]
+elitism            = 2
+survival_threshold = 0.2

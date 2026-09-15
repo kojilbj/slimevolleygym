@@ -1,7 +1,25 @@
 # Trains an agent using NEAT (neat-python), evolving both the topology and
 # weights of a small feedforward network.
 #
-# Run 5: self-play curriculum, v2. Run 4's self-play (see
+# Run 12: mixed opponent pool. Run 11 (pure self-play, num_hidden=10,
+# complexity_penalty, multi-opponent dethroning, protected bx/x repair,
+# forward/backward tie-break) finally produced genuinely competent
+# rallying (champion_0035: 16-72 ball touches depending on opponent,
+# near-parity with BaselinePolicy at -1). Copied from train_neat.py at
+# that point (see neat/EXPERIMENT_LOG.md) to try mixing this repo's own
+# pretrained zoo models (zoo/ga_sp, zoo/cmaes, zoo/cmaes_sp) plus
+# BaselinePolicy itself into the opponent archive as permanent,
+# never-evicted sparring partners alongside the rotating self-play
+# lineage -- feasible now that the population is skilled enough for
+# these stronger opponents to give a non-flat fitness gradient (see
+# "why #3 was set aside" in the run 4/5 section: mixing in BaselinePolicy
+# was judged premature back then because every genome lost to it
+# identically; that is no longer true). External models have no genome
+# and can never be "crowned" -- they only enrich OpponentArchive.sample()
+# and the dethroning check's opponent pool; only NEAT genomes (evolved by
+# this population) can become a new champion_NNNN.pkl.
+#
+# Original run 5 self-play curriculum, v2. Run 4's self-play (see
 # neat/EXPERIMENT_LOG.md) produced 172 clean "dethronings" but the final
 # champion turned out to have NO functional path from its 12 observation
 # inputs to its outputs -- it just emitted a fixed action regardless of
@@ -77,6 +95,7 @@
 # always have at least one enabled path to an output, applied fresh
 # every generation in eval_genomes.
 
+import copy
 import os
 import pickle
 import random
@@ -88,11 +107,12 @@ import numpy as np
 
 import slimevolleygym
 from slimevolleygym import BaselinePolicy, multiagent_rollout as rollout
+from slimevolleygym.mlp import makeSlimePolicy, makeSlimePolicyLite
 from slimevolleygym.neat_policy import NeatPolicy
 
 # Settings
 random_seed = 612
-n_generations = 5000
+n_generations = 100  # quick trial run to sanity-check the mixed opponent pool before scaling up
 save_freq = 10
 n_rollouts = 3             # per-genome fitness rollouts, vs opponents sampled from the archive
 n_challenge_rollouts = 20  # rollouts used to decide whether to dethrone
@@ -103,7 +123,7 @@ complexity_penalty = 0.01  # subtracted per genome node, to directly select agai
 local_dir = os.path.dirname(__file__)
 config_path = os.path.join(local_dir, "neat_config_selfplay_v6.txt")
 
-logdir = "neat_run11_full"
+logdir = "neat_run12"
 if not os.path.exists(logdir):
   os.makedirs(logdir)
 
@@ -165,30 +185,52 @@ def connectivity_report(genome):
   return n_nodes, n_enabled, working_inputs
 
 
-class OpponentArchive:
-  """ Holds a rotating set of self-play opponents: the original
-  TrackingPolicy seed plus up to `archive_max_size` past champions.
-  Genomes are evaluated against opponents sampled from the whole
-  archive, not just the single most recent champion, to reduce
-  overfitting to one narrow lineage. """
+def load_external_opponents():
+  """ This repo's own pretrained zoo models, evaluated vs BaselinePolicy
+  before including them (see neat/EXPERIMENT_LOG.md, run 12):
+    cmaes_sp:  mean -0.15 (slightly weaker than BaselinePolicy)
+    ga_sp:     mean +0.23 (beats it)
+    cmaes:     mean +1.00 (beats it solidly)
+  Together with BaselinePolicy itself, this gives a rough difficulty
+  ladder alongside the self-play lineage. """
+  return [
+      makeSlimePolicy(os.path.join(local_dir, "..", "zoo", "cmaes_sp", "slimevolley.cma.16.384.best.json")),
+      makeSlimePolicyLite(os.path.join(local_dir, "..", "zoo", "ga_sp", "ga.json")),
+      makeSlimePolicy(os.path.join(local_dir, "..", "zoo", "cmaes", "slimevolley.cma.64.96.best.json")),
+      BaselinePolicy(),
+  ]
 
-  def __init__(self):
-    self.archive = [TrackingPolicy()]
+
+class OpponentArchive:
+  """ Holds two pools of opponents: `permanent` (the TrackingPolicy seed
+  plus fixed external models -- these never change and can never be
+  "crowned", since they have no genome) and `rotating` (up to
+  `archive_max_size` past self-play champions). Genomes are evaluated
+  against opponents sampled from across both pools, not just the single
+  most recent champion, to reduce overfitting to one narrow lineage. """
+
+  def __init__(self, permanent_opponents):
+    self.permanent = list(permanent_opponents)
+    self.rotating = []
     self.generation = 0
 
+  def pool(self):
+    return self.permanent + self.rotating
+
   def sample(self):
-    return random.choice(self.archive)
+    return random.choice(self.pool())
 
   def maybe_add_champion(self, challenger_genome, config):
     challenger_policy = NeatPolicy(challenger_genome, config)
-    # Test against several opponents sampled from across the whole
-    # archive, not just the single most recent champion -- run 6 found
-    # that gating on "beats only the latest champion" let genomes
-    # collapse to a narrow fixed action that happened to exploit that
-    # one opponent, rather than requiring genuinely broad competence
-    # (see neat/EXPERIMENT_LOG.md, run 6 postmortem).
-    n_test_opponents = min(4, len(self.archive))
-    test_opponents = random.sample(self.archive, n_test_opponents)
+    # Test against several opponents sampled from across the whole pool,
+    # not just the single most recent champion -- run 6 found that
+    # gating on "beats only the latest champion" let genomes collapse to
+    # a narrow fixed action that happened to exploit that one opponent,
+    # rather than requiring genuinely broad competence (see
+    # neat/EXPERIMENT_LOG.md, run 6 postmortem).
+    pool = self.pool()
+    n_test_opponents = min(4, len(pool))
+    test_opponents = random.sample(pool, n_test_opponents)
     rollouts_each = max(1, n_challenge_rollouts // n_test_opponents)
     scores = []
     for opponent in test_opponents:
@@ -198,24 +240,24 @@ class OpponentArchive:
         scores.append(-score)
     mean_score = sum(scores) / len(scores)
     if mean_score > dethrone_margin:
-      self.archive.append(challenger_policy)
-      if len(self.archive) > archive_max_size:
-        del self.archive[1]  # drop the oldest champion, but keep the seed (index 0)
+      self.rotating.append(challenger_policy)
+      if len(self.rotating) > archive_max_size:
+        del self.rotating[0]  # drop the oldest champion; permanent opponents are never evicted
       self.generation += 1
       model_filename = os.path.join(logdir, "champion_" + str(self.generation).zfill(4) + ".pkl")
       with open(model_filename, "wb") as out:
         pickle.dump(challenger_genome, out)
       n_nodes, n_enabled, working_inputs = connectivity_report(challenger_genome)
       print(f"SELFPLAY: new champion (gen {self.generation}), "
-            f"mean score vs {n_test_opponents} sampled archive opponents: {mean_score:.2f}, "
-            f"archive size: {len(self.archive)}, "
+            f"mean score vs {n_test_opponents} sampled pool opponents: {mean_score:.2f}, "
+            f"rotating archive size: {len(self.rotating)} (+{len(self.permanent)} permanent), "
             f"connectivity: {n_nodes} nodes / {n_enabled} enabled conns / "
             f"{working_inputs}/12 inputs reach an output")
       return True
     return False
 
 
-archive = OpponentArchive()
+archive = OpponentArchive([TrackingPolicy()] + load_external_opponents())
 
 # Inputs that must always keep at least one enabled path to an output.
 # Added after run 8's champion lost BOTH of these entirely (parsimony
@@ -274,6 +316,29 @@ def eval_genomes(genomes, config):
   archive.maybe_add_champion(best_genome, config)
 
 
+# Start from run 11's champion_0035 (the first genuinely competent
+# rallying genome, see neat/EXPERIMENT_LOG.md) instead of a fresh random
+# population, since the point of this run is "given a genome that can
+# already rally, does training against stronger/external opponents from
+# here push it further" -- not re-deriving basic competence from scratch.
+seed_genome_path = os.path.join(local_dir, "neat_run11_full", "champion_0035.pkl")
+
+
+def seed_population(population, config, seed_genome_path, pop_size):
+  with open(seed_genome_path, "rb") as f:
+    seed_genome = pickle.load(f)
+  new_population = {}
+  for i in range(pop_size):
+    genome_id = next(population.reproduction.genome_indexer)
+    g = copy.deepcopy(seed_genome)
+    g.key = genome_id
+    if i > 0:  # keep one exact copy, mutate the rest for initial diversity
+      g.mutate(config.genome_config)
+    new_population[genome_id] = g
+  population.population = new_population
+  population.species.speciate(config, population.population, population.generation)
+
+
 def run():
   config = neat.Config(
       neat.DefaultGenome,
@@ -284,6 +349,7 @@ def run():
   )
 
   population = neat.Population(config)
+  seed_population(population, config, seed_genome_path, config.pop_size)
   population.add_reporter(neat.StdOutReporter(True))
   stats = neat.StatisticsReporter()
   population.add_reporter(stats)
