@@ -909,16 +909,37 @@ that this failure mode (a genome exploiting the current archive without
 actually playing) is common, not a one-off, and this check is pulling
 real weight.
 
+`neat_run15_full` ran ~90 generations (2522 -> 2613) and produced one
+new champion, **champion_0040**, which cleared the movement gate (so it
+genuinely moves) but on screen was moving in a way anti-correlated with
+the ball (corr -0.855) -- ball touches 0. User: "うん逆に動いてるな笑
+これが0035に勝ったの？" Tested directly against champion_0035 on screen:
+**0035 won 5-0** in 537 steps. champion_0035 had long since rotated out
+of the 9-slot rotating archive (many newer champions came and went since
+it was crowned around generation 902), so nothing since had to beat it
+specifically -- champion_0040 only ever had to clear the *current*
+archive, which by now no longer included it.
+
+## Run 16 — reintroduce champion_0035 into the archive
+
+User's request: put champion_0035 back into the archive and keep
+training, rather than let a genuinely strong old genome be forgotten
+purely because it's old and the rotating archive only keeps the most
+recent 9. Resumed run 15 from its generation-2613 checkpoint (same
+re-speciation/node_indexer fixes applied) with champion_0035 manually
+appended to the archive on top of the normal reload (`archive size now
+11` -- one over the usual cap, since it's an explicit one-time addition
+rather than replacing a normal rotation slot; natural rotation will
+prune from the front over time as usual).
+
 ## Current status (2026-09-15)
 
-`neat_run15_full` is running (resumed from run 14's generation 2522,
-same config, `n_rollouts=6`, movement-std gate added to
-`maybe_add_champion`, archive reloaded with the last 9 of 39 real
-champions across all three prior runs' logdirs), targeting generation
-5000 total (`n_generations=2478` more). Automatic ~100-generation
-milestone check-ins continue via a background monitor (now also
-reporting cumulative rejection count). Not yet evaluated against
+`neat_run16_full` is running (resumed from run 15's generation 2613,
+same config/gates, archive = last 9 of 40 real champions +
+champion_0035 manually reintroduced), targeting generation 5000 total
+(`n_generations=2387` more). Automatic ~100-generation milestone
+check-ins continue via a background monitor. Not yet evaluated against
 `BaselinePolicy` with a full 100-episode `eval_neat.py` readout (only
 single on-screen matches so far) — that remains the next step once
-run 15 finishes, produces a champion that clears the new movement gate
-by a comfortable margin, or plateaus clearly.
+run 16 finishes, produces a champion that clearly beats champion_0035,
+or plateaus clearly.
