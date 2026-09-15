@@ -1113,14 +1113,58 @@ generation-121 resume point with no traceback, with the existing
 ball-touch and movement-std gates still visibly rejecting bad challengers
 during the run.
 
+`neat_run20_full` ran from generation 121 to 262 with no crashes and no
+new champion crowned (still champion_0046, from run 19). Evaluated
+champion_0046 against `BaselinePolicy` over 100 episodes: mean score
+-0.920, 2/46/52 wins/draws/losses — not yet beating the baseline.
+Head-to-head against champion_0035 over 100 episodes: champion_0035 won
+38/100 to champion_0046's 17/100 (45 draws) — 0046 is still weaker than
+the run-11 champion this whole lineage was seeded from.
+
+On-screen review of champion_0046 vs `BaselinePolicy` found it
+repeatedly hitting the ball on its own side without ever sending it back
+over the net — user: "今のchampionはひたすら触り続けてボールを相手に返し
+てなかったよ". The existing `min_avg_touches` gate only checks that a
+challenger plays the ball at all; it never checks whether any of those
+touches actually cross the net, so this exact failure mode passed
+straight through it untouched. It also isn't caught by run 20's
+decisiveness penalty, since that's keyed on touches-per-point-*won* and
+this stalling behavior may never resolve into either a win or a loss.
+
+## Run 21 — net-clearing gate
+
+Added `net_clear_rate` tracking to `measure_behavior()`: after each of
+the candidate's touches, watches whether the ball's x subsequently
+clears the far edge of the net (`REF_WALL_WIDTH/2`) before either the
+candidate touches it again or the rollout ends. `maybe_add_champion` now
+rejects any challenger whose `net_clear_rate` (aggregated touches-
+returned / total-touches across the existing `n_behavior_checks=3`
+rollouts) falls below `min_net_clear_rate`.
+
+Calibrated by direct measurement (5 rollouts vs `TrackingPolicy`, same
+approach as the `min_avg_touches` calibration): champion_0035 scored
+0.30, champion_0037 (run 19) scored 0.16, and champion_0046 — the
+juggling genome that prompted this gate — scored 0.03.
+`min_net_clear_rate=0.10` sits cleanly between the known-good champions
+and champion_0046.
+
+Stopped `neat_run20_full` (generation 262, no crowning since resume) and
+launched `neat_run21_full`, resuming its population from checkpoint-262
+with the new gate active, archive rebuilt from run 18 + 19 + 20's
+champions (run 20 crowned none) plus champion_0035 reintroduced.
+Verified via a 2-generation smoke run before the real launch: restores
+the checkpoint cleanly, re-speciates, and the existing gates still fire
+correctly with the new gate wired in ahead of the dethroning test.
+
 ## Current status (2026-09-15)
 
-`neat_run20_full` is running (resumed from run 19's generation 121,
-`neat_config_selfplay_v9.txt`, decisiveness penalty active, archive =
-run 18 + run 19 champions + champion_0035), targeting generation 3000
-total for this champion_0035-seeded lineage (`n_generations=2884` more).
-Automatic ~100-generation milestone check-ins continue via a background
-monitor. Not yet evaluated against `BaselinePolicy` with a full
-100-episode `eval_neat.py` readout — that remains the next step once a
-new champion clearly and repeatedly beats champion_0035 with visibly
-fewer touches per point, or the run plateaus clearly.
+`neat_run21_full` is running (resumed from run 20's generation 262,
+`neat_config_selfplay_v9.txt`, decisiveness penalty + net-clear gate both
+active, archive = run 18 + 19 + 20 champions + champion_0035), targeting
+generation 3000 total for this champion_0035-seeded lineage
+(`n_generations=2738` more). A background monitor watches for new
+champions, net-clear rejections, and crashes. Not yet evaluated against
+`BaselinePolicy` with a full 100-episode `eval_neat.py` readout — that
+remains the next step once a new champion clearly and repeatedly beats
+champion_0035, actually returns the ball reliably on screen, and does so
+with visibly fewer touches per point, or the run plateaus clearly.
