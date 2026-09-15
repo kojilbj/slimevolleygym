@@ -1,0 +1,209 @@
+#--- configuration for NEAT self-play on SlimeVolley-v0 (run 19, v9) ---#
+# v9: run 18 crashed at generation 14 with
+# "RuntimeError: could not match pop_size=128 with min_species_size=2".
+# Species count grew 33 -> 45 -> 65 in just 14 generations (v8's
+# compatibility_threshold=0.7 was calibrated only against the
+# generation-0 snapshot, but genetic distance grows as genomes add
+# structure over time, and 65*min_species_size(2) > pop_size(128)).
+# neat-python computes the *effective* min_species_size as
+# max(config min_species_size, elitism) (reproduction.py:219) -- our
+# elitism=2 was silently setting the real floor to 2, not the 1 we
+# assumed. Two changes:
+#   - compatibility_threshold  0.7 -> 1.2  (more headroom as the
+#     population's genomes grow more complex over many generations)
+#   - elitism  2 -> 1  (halves the crash threshold from
+#     num_species>64 to num_species>128, a much safer margin against
+#     this same class of crash recurring even if species count spikes
+#     again)
+#
+#--- configuration for NEAT self-play on SlimeVolley-v0 (run 18, v8) ---#
+# v8: run 18 seeds its initial population from 128 mutated copies of
+# champion_0035 (a small, already-evolved genome) instead of a fresh
+# random population -- pairwise genetic distance among the seeded
+# population averages only ~0.67 (max ~1.2), far below v7's
+# compatibility_threshold=1.6 (calibrated for a very different, more
+# node-heavy population in run 13). At 1.6 the seeded population would
+# have collapsed into 1 species immediately, the same mistake made (and
+# fixed) once already in run 6/13. Empirically retested on this
+# population: 0.3 -> 94 species (way too fragmented), 0.5 -> 27
+# (one species with 97 members, rest singletons), 0.7 -> 8 species
+# (118 + a handful of small ones, a reasonable balance), 1.0 -> 1
+# species. Picked 0.7.
+#   - compatibility_threshold  1.6 -> 0.7
+#
+#--- configuration for NEAT self-play on SlimeVolley-v0 (run 13, v7) ---#
+# v7: run 11's 5000-gen attempt stayed in a single species for 467+
+# generations (species_elitism=2 makes a lone species immune to
+# stagnation-culling) and its best fitness clearly trended DOWN over
+# time (sampled every 50 generations: 2.9/3.3/2.6/2.3/3.6 early on, then
+# -0.7/0.3/-1.0/-0.03/1.3/-0.03/-1.4/0.95/-0.74/-1.7 later) -- classic
+# genetic drift from losing niche protection, not "the champion is just
+# strong" (a strong-but-stable champion would plateau, not decline).
+# Measured actual pairwise genetic distance in the live population
+# (checkpoint-770): mean 1.43, max 2.30 -- the old threshold of 6.0
+# (calibrated for run 6's freshly-initialized, much less differentiated
+# population) was never going to split this population into multiple
+# species. Empirically retested thresholds on this same checkpoint:
+# 1.2 -> 30 species (too fragmented), 1.6 -> 9 species (sizes 2-42,
+# reasonable), 1.8 -> 6, 2.0 -> 2, 2.2 -> 1. Picked 1.6.
+#   - compatibility_threshold  6.0 -> 1.6
+# Used with neat.Checkpointer.restore_checkpoint(..., new_config=...) to
+# resume run 11 from generation 770 under this new threshold (followed
+# by an explicit re-speciate call, since restoring a checkpoint keeps
+# the OLD species assignments otherwise).
+# v6: v5's 5000-gen run (stopped at gen 654) had NO bloat but also no
+# growth -- connectivity oscillated in the 2-5/12 range for hundreds of
+# generations without a clear upward trend, stuck at 3-4 total nodes.
+# Comparison against this repo's own pretrained self-play zoo model
+# (zoo/ga_sp/ga.json, a FIXED-topology 12->10->10->3 tanh MLP evolved by
+# train_ga_selfplay.py) showed it actually beats BaselinePolicy (mean
+# score +0.23, 29/61/10 win/draw/loss over 100 episodes) -- proof
+# self-play itself works fine here, given enough network capacity from
+# the start. NEAT's "start minimal, grow topology as needed" philosophy
+# (num_hidden=0) may itself be the bottleneck: building a working
+# multi-layer pathway one node/connection at a time via mutation is slow
+# and fragile (see runs 4-5's whole history of lost/dead-end/bloated
+# pathways). This deliberately departs from NEAT's usual practice by
+# starting with real hidden-layer capacity already in place:
+#   - num_hidden       0 -> 10
+# complexity_penalty is also removed in train_neat.py for this config,
+# since 10 baseline hidden nodes are necessary capacity, not bloat.
+# v4: v3's 100-generation trial (neat_run5b/) had all 3 outputs finally
+# reacting to *something*, but a direct probe (holding all inputs at 0
+# and sweeping one at a time) showed bx (ball x-position) and the
+# agent's own x-position had ZERO enabled outgoing connections -- the
+# single most important signal for chasing the ball horizontally had
+# been fully deleted from the genome, not just disabled. That's the
+# "doesn't react to the ball" behavior visible on screen.
+# Deletion is effectively irreversible (the connection gene is gone;
+# it would need conn_add_prob to re-roll that exact same pair by luck),
+# whereas disabling (enabled=False) is reversible via
+# enabled_mutate_rate. So push delete rates much lower and let
+# "enabled" toggling do the work of temporarily silencing a connection
+# instead of destroying it.
+#
+# v5: v4's deletion rates (0.05/0.02) were too low the other way -- a
+# 5000-generation run bloated to 158 nodes with only 33 enabled
+# connections (105 nodes completely orphaned) and ended up with ZERO
+# working input-to-output paths again, just via bloat instead of
+# deletion this time (see neat/EXPERIMENT_LOG.md, run 5 postmortem).
+# Fix: split the difference on deletion rates, slow down node creation,
+# and add an explicit parsimony penalty in train_neat.py's eval_genomes
+# so bloat is directly selected against instead of only indirectly
+# discouraged via the delete-rate knob:
+#   - conn_delete_prob  0.05 -> 0.1
+#   - node_delete_prob  0.02 -> 0.05
+#   - node_add_prob     0.2  -> 0.1  (grow structure more slowly)
+# Based on neat_config_selfplay.txt (run 4), with changes made after
+# finding run 4's "best" genome had no functional path from any of the
+# 12 observation inputs to its outputs -- it just output a fixed action
+# regardless of input (see neat/EXPERIMENT_LOG.md, run 4 postmortem):
+#   - conn_delete_prob  0.5 -> 0.2
+#   - node_delete_prob  0.2 -> 0.1
+# Run 4 likely lost its sensory pathways to random deletion (NEAT's
+# mutate_add_node splits a connection and disables the original; if the
+# new incoming half is later deleted, the new node -- and anything
+# downstream of it -- becomes permanently cut off from the inputs).
+# Lowering deletion rates relative to the add rates should let
+# input-to-output pathways survive long enough for selection to act on
+# them, instead of being pruned away before they matter.
+#
+# v3: a 100-generation trial of the above (neat_run5/) still had 2 of 3
+# outputs saturated at a constant 0 or 1 regardless of input (visually:
+# the agent walked straight into the net and never jumped). Root cause:
+# neat-python's sigmoid is sigmoid(5*z) -- 5x steeper than standard --
+# so even a bias of about +-1 is enough to saturate a node's output
+# independent of any weighted input. With bias_init_stdev=1.0 and
+# bias_max_value=30, biases can trivially dominate before evolution
+# finds a useful input-weight pattern. Fix: keep biases closer to zero
+# and change more slowly, so weighted inputs have room to actually swing
+# the output:
+#   - bias_init_stdev   1.0 -> 0.5
+#   - bias_mutate_power 0.5 -> 0.2
+#   - bias_max_value    30.0 -> 5.0
+#   - bias_min_value    -30.0 -> -5.0
+
+[NEAT]
+fitness_criterion       = max
+fitness_threshold        = 5.0
+no_fitness_termination = True
+pop_size               = 128
+reset_on_extinction    = True
+
+[DefaultGenome]
+# node activation options
+activation_default      = sigmoid
+activation_mutate_rate  = 0.0
+activation_options      = sigmoid
+
+# node aggregation options
+aggregation_default     = sum
+aggregation_mutate_rate = 0.0
+aggregation_options     = sum
+
+# node bias options
+bias_init_mean          = 0.0
+bias_init_stdev         = 0.5
+bias_max_value          = 5.0
+bias_min_value          = -5.0
+bias_mutate_power       = 0.2
+bias_mutate_rate        = 0.7
+bias_replace_rate       = 0.1
+
+# genome compatibility options
+compatibility_disjoint_coefficient = 1.0
+compatibility_weight_coefficient   = 0.5
+
+# connection add/remove rates
+conn_add_prob           = 0.5
+conn_delete_prob        = 0.1
+
+# connection enable options
+enabled_default         = True
+enabled_mutate_rate     = 0.01
+
+feed_forward            = True
+initial_connection      = full_nodirect
+
+# node add/remove rates
+node_add_prob            = 0.1
+node_delete_prob         = 0.05
+
+# network parameters
+num_hidden               = 10
+num_inputs                = 12
+num_outputs                = 3
+
+# node response options
+response_init_mean      = 1.0
+response_init_stdev     = 0.0
+response_max_value      = 30.0
+response_min_value      = -30.0
+response_mutate_power   = 0.0
+response_mutate_rate    = 0.0
+response_replace_rate   = 0.0
+
+# connection weight options
+weight_init_mean         = 0.0
+weight_init_stdev        = 1.0
+weight_max_value         = 30
+weight_min_value         = -30
+weight_mutate_power      = 0.5
+weight_mutate_rate       = 0.8
+weight_replace_rate      = 0.1
+
+[DefaultSpeciesSet]
+# Lowered from 6.0 for run 13 -- see header comment: the live
+# (post-selection, mostly-simplified) population's actual pairwise
+# distance is much smaller (mean 1.43) than a freshly-initialized one,
+# so the old threshold kept everything in a single species indefinitely.
+compatibility_threshold = 1.2
+
+[DefaultStagnation]
+species_fitness_func = max
+max_stagnation       = 20
+species_elitism      = 2
+
+[DefaultReproduction]
+elitism            = 1
+survival_threshold = 0.2
