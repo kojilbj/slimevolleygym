@@ -852,15 +852,73 @@ remembering for any future resume, not just chained ones -- this could
 in principle happen on a *first* resume too, given the right population
 state; run 13 simply didn't hit it by luck.
 
+`neat_run14_full` ran for ~470 generations (2021 -> 2500ish) with fitness
+staying in a healthy, non-declining range. It produced one new champion,
+**champion_0039**, which passed the 20-rollout dethroning score test —
+but on screen, both in a mirror-ish match and directly against
+`BaselinePolicy`, it was clearly worse than champion_0035/0038 (1 ball
+touch, lost -5 to `BaselinePolicy` in 568 steps). User: "泥試合でした" →
+"どっちも弱かったんだよ" → **"ずっと右の壁に張り付いてる...何もしてないんだよ"**.
+
+## Diagnosing champion_0039: passed the score test while stuck at a wall
+
+Swept `bx` and the agent's own `x` through champion_0039's network
+directly: `backward` (retreat toward its own wall) fired for nearly
+every realistic `bx` value (only the extreme `bx=-2` produced
+`forward`), and for its own `x` only very negative values (already past
+the net) triggered `forward` -- in practice, from any normal starting
+position, it just walks to its own back wall and sits there. This is
+not the same bug as run 9b's simultaneous forward+backward firing (fixed
+in `NeatPolicy`, and confirmed still working here) -- it's a plain
+weight-bias problem: this genome's horizontal decision is dominated by
+a near-constant backward bias regardless of the ball, and it happened to
+be *good enough* against the specific 4 archive opponents sampled during
+its dethroning check to average past `dethrone_margin=0.5` anyway.
+Comparing it against champion_0035 on screen (972 steps, champion_0035
+won) initially looked like an interesting non-monotonicity in self-play
+skill, but the user correctly reframed it: champion_0039 isn't "losing a
+competitive match", it's simply not functioning, so of course a
+genuinely-playing opponent beats it.
+
+## Run 15 — reject degenerate (non-moving) challengers directly
+
+User's request: add a check for "is it actually moving" to the
+dethroning process itself, not just a score threshold. Added
+`measure_movement_std()`: roll the challenger out once against a sampled
+archive opponent and compute the standard deviation of its own x
+position; below `min_movement_std=3.0`, reject immediately without even
+running the expensive 20-rollout score test (cheap gate first, saving
+compute on obviously-broken challengers).
+
+First version used **range** (max-min) instead of stdev and was
+immediately fooled by champion_0039 itself: it scored `x_range=9.92` --
+comfortably above a naive threshold -- because it moves for its first
+~20 of 568 steps before freezing at one wall for the rest, which still
+produces a decent-looking range. Switched to standard deviation, which
+is dominated by how the position is distributed over *time*, not just
+its extremes: champion_0039 measured **std=1.00-2.32** across several
+challengers rejected in the first 9 generations of run 15, clearly
+separated from champions 0035/0038's **std=5.7-6.6** under the same
+test. Verified directly against known genomes before relying on it.
+
+Resumed run 14 from its generation-2522 checkpoint (with the by-now
+routine re-speciation + `node_indexer` fixes from run 13/14 also
+applied) with this new gate in place. Within the first 9 generations, 6
+challengers were rejected for being stuck at a wall — a strong signal
+that this failure mode (a genome exploiting the current archive without
+actually playing) is common, not a one-off, and this check is pulling
+real weight.
+
 ## Current status (2026-09-15)
 
-`neat_run14_full` is running (resumed from run 13's generation 2021,
-same `neat_config_selfplay_v7.txt`, `n_rollouts=6`, archive reloaded
-with the last 9 of 38 real champions across both prior runs' logdirs),
-targeting generation 5000 total (`n_generations=2979` more). Automatic
-~100-generation milestone check-ins continue via a background monitor.
-Not yet evaluated against `BaselinePolicy` with a full 100-episode
-`eval_neat.py` readout (only single on-screen matches so far, against
-`TrackingPolicy`/`champion_0034`/`champion_0035`(mirror)/`BaselinePolicy`/
-`ga_sp`, using champion_0035 and champion_0038) — that remains the next
-step once run 14 finishes or plateaus clearly.
+`neat_run15_full` is running (resumed from run 14's generation 2522,
+same config, `n_rollouts=6`, movement-std gate added to
+`maybe_add_champion`, archive reloaded with the last 9 of 39 real
+champions across all three prior runs' logdirs), targeting generation
+5000 total (`n_generations=2478` more). Automatic ~100-generation
+milestone check-ins continue via a background monitor (now also
+reporting cumulative rejection count). Not yet evaluated against
+`BaselinePolicy` with a full 100-episode `eval_neat.py` readout (only
+single on-screen matches so far) — that remains the next step once
+run 15 finishes, produces a champion that clears the new movement gate
+by a comfortable margin, or plateaus clearly.
