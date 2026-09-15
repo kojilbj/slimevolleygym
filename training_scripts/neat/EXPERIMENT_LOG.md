@@ -1007,15 +1007,54 @@ playing each other tend toward longer, closer matches. Species count
 spiked to 33-45 (mostly singletons) despite the recalibrated threshold
 -- worth watching, but not adjusted yet.
 
+Generation 0 alone produced two dethronings (champion_0043, 0044), and
+the run kept producing champions steadily through generation 13
+(champions up to 0052) -- a strong early signal that restarting from
+champion_0035 was working. Species count kept climbing the whole time
+(33 -> 45 -> 65), which turned out to matter more than "worth watching".
+
+## Run 18 crashed at generation 14
+
+```
+RuntimeError: Internal error adjusting spawn counts: could not match
+pop_size=128 with min_species_size=2
+```
+
+Two compounding causes. First, `compatibility_threshold=0.7` had only
+been calibrated against the generation-0 snapshot; genetic distance
+grows as genomes add structure over subsequent generations, so a fixed
+threshold gets effectively stricter (more, smaller species) over time --
+by generation 13, 65 species. Second, and less obvious: neat-python
+computes the *effective* `min_species_size` as
+`max(config value, elitism)` (`reproduction.py:219`) -- this run's
+`elitism=2` silently raised the real floor from the assumed 1 to 2, so
+`65 species * 2 > 128` broke reproduction's spawn-count math outright.
+
+## Run 19 — raise the threshold further, and lower elitism as a safety margin
+
+`neat_config_selfplay_v9.txt`: `compatibility_threshold` 0.7 -> 1.2 (more
+headroom for the growing-over-time effect above) and `elitism` 2 -> 1
+(halves the crash threshold from `num_species > 64` to
+`num_species > 128`, a much safer margin against this same class of
+crash recurring even if species count spikes again). Verified
+empirically against run 18's actual generation-10 checkpoint before
+relying on it: 21 species, safely under the new threshold with headroom
+to spare.
+
+Resumed run 18 from that generation-10 checkpoint (not from scratch
+again) with the fixed config, and reconstructed the archive from run
+18's own champions (43-52) plus champion_0035 explicitly kept alongside
+them. Confirmed the run survives well past generation 14, the point
+where the previous attempt died.
+
 ## Current status (2026-09-15)
 
-`neat_run18_full` is running (fresh population seeded from
-champion_0035, `neat_config_selfplay_v8.txt`, archive =
-`[TrackingPolicy, champion_0035]`, all of run 15-17's gates active),
-targeting `n_generations=3000` from a fresh generation-0 start (not tied
-to prior runs' generation counts; new champions continue the global
-numbering from 43). Automatic ~100-generation milestone check-ins
-continue via a background monitor. Not yet evaluated against
+`neat_run19_full` is running (resumed from run 18's generation 10,
+`neat_config_selfplay_v9.txt`, archive = last 9 of run 18's own
+champions + champion_0035, all of run 15-17's gates active), targeting
+generation 3000 total for this champion_0035-seeded lineage
+(`n_generations=2990` more). Automatic ~100-generation milestone
+check-ins continue via a background monitor. Not yet evaluated against
 `BaselinePolicy` with a full 100-episode `eval_neat.py` readout — that
 remains the next step once a new champion clearly and repeatedly beats
 champion_0035, or the run plateaus clearly.
