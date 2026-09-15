@@ -308,17 +308,503 @@ some measurable variation against `BaselinePolicy` — at that point it
 could help the population generalize instead of overfitting to its own
 recent lineage. Doing #1 first is the more promising order.
 
-## Stopping point (2026-09-14)
+## Run 5 — fixing self-play's degenerate equilibrium
 
-Four approaches tried in one session (raw single-rollout fitness,
+Goal for this round, explicitly set with the user: actually beat
+`BaselinePolicy` (win rate > 0%), not just show incremental metric
+improvement. Before scaling self-play up, the user watched run 4's
+`best.pkl` play on screen and noticed it just stood in the middle
+jumping, never reacting to the ball. That observation turned out to be
+exactly right and led to the real diagnosis below.
+
+### Root cause found by inspection, not just visual observation
+
+Probing run 4's `best.pkl` with synthetic/random observations showed
+its 3 outputs were **completely constant regardless of input**
+(`[1.0, 0.048, 1.0]` for literally any observation, including random
+noise). Tracing the genome's connection graph: the only path to one
+output went through a hidden node with zero enabled incoming
+connections (an orphan, likely left over from a `mutate_add_node` split
+whose incoming half was later deleted); the other two outputs had no
+input-facing path at all. So run 4's 172 "dethronings" were really just
+an arms race between mutually blind fixed-action strategies — self-play
+against a random-action seed never rewards reacting to the ball at all,
+so there was no pressure to keep sensory pathways wired up, and NEAT's
+default deletion rates pruned them away.
+
+### Three fixes applied together (`train_neat.py`, `logdir = "neat_run5*"`)
+
+1. **`TrackingPolicy`** — a simple scripted opponent (move toward the
+   ball's x position, jump when close/low) replaces `RandomPolicy` as
+   the self-play archive's seed, so reacting to the ball matters from
+   generation 0.
+2. **`OpponentArchive`** — keeps the seed plus up to 10 past champions;
+   genomes are evaluated against opponents *sampled* from the archive
+   rather than only the single most recent one, to reduce overfitting to
+   one narrow lineage.
+3. **Lower `conn_delete_prob`/`node_delete_prob`** in
+   `neat_config_selfplay_v2.txt` (0.5→0.2, 0.2→0.1) so sensory pathways
+   survive long enough to matter.
+
+### Iterating in short 100-generation trials before committing to a long run
+
+| trial | config change vs. previous | finding (from direct connection-graph inspection + on-screen play) |
+|---|---|---|
+| `neat_run5` (v2) | fixes 1-3 above | 2 of 3 outputs still saturated constant; agent walked into the wall, no jump — user: "stuck to the middle wall" |
+| `neat_run5b` (v3) | + lower bias volatility: `bias_init_stdev` 1.0→0.5, `bias_mutate_power` 0.5→0.2, `bias_max/min_value` ±30→±5 (neat-python's `sigmoid(5*z)` is steep enough that bias alone easily saturates a node regardless of input) | all 3 outputs numerically reactive to *random* input, but a systematic one-input-at-a-time sweep showed **zero enabled connections from `bx` (ball x) or the agent's own `x`** — the network still couldn't sense left/right at all. User, watching it play: "not reacting to the ball" |
+| `neat_run5c` (v4) | `conn_delete_prob` 0.2→0.05, `node_delete_prob` 0.1→0.02 (deletion is ~irreversible; disabling is reversible via `enabled_mutate_rate`, so push nearly all pruning through disabling instead) | `bx` now has an enabled outgoing connection, but it dead-ends at an orphaned hidden node with no further path to any output — connected but not yet functional. Judged as expected mid-flight state for a 100-generation run, not a new bug |
+
+Beat `BaselinePolicy` was the stated goal, so after 3 short trials
+showing steady (if incomplete) progress, moved to a real run: **5000
+generations, `neat_config_selfplay_v4.txt`, `logdir = "neat_run5_full"`**
+(estimated ~10-12h at the measured ~8s/generation).
+
+### The long run revealed a new problem: unconstrained bloat
+
+At generation ~800 (~1.5h in), the population had collapsed to a single
+species (`species_elitism=2` means a lone species is always "top 2" and
+so is immune to the stagnation-based culling that would normally remove
+a non-improving species — discussed with the user and accepted as
+non-fatal on its own). More seriously, inspecting the current self-play
+champion directly:
+
+```
+total nodes: 158   total connections: 507   enabled: 33
+105 of 158 nodes have ZERO enabled connections (in or out) -- pure deadweight
+NONE of the 12 inputs reach ANY output through an enabled path
+```
+
+So the v4 fix (near-zero deletion rates) traded run 4's problem (useful
+connections pruned away) for a worse one: with `node_delete_prob=0.02`,
+nodes accumulate almost monotonically (158 nodes for a 12-input/3-output
+task), and every new node/connection added by mutation lands in an
+exponentially larger graph, making it statistically less and less likely
+that any given mutation completes a working end-to-end path rather than
+wiring together two irrelevant interior nodes. The genome became a much
+bigger haystack with the same (or fewer) working needles. **Stopped the
+run at generation ~800** rather than let it continue for another ~7
+hours in a confirmed-nonfunctional state.
+
+### Conclusion
+
+Deletion rates that are too high (run 4's defaults) lose sensory
+pathways; deletion rates that are too low (run 5's v4) cause unbounded,
+mostly-non-functional node bloat that dilutes the search space instead.
+Neither extreme worked. A real fix likely needs one of:
+
+- A genome-size/complexity penalty in the fitness function (classic NEAT
+  "parsimony pressure") so bloat is actively selected against, rather
+  than only controlled via the delete-rate knob.
+- A cap on `node_add_prob` relative to `conn_add_prob` so new nodes are
+  added more slowly than the connections needed to wire them up.
+- Re-checking connectivity (not just fitness) periodically during a long
+  run — e.g. an automated check like the ones done by hand above,
+  logged every N generations — so a regression like this is caught in
+  minutes instead of requiring a manual inspection to notice.
+
+Not yet re-attempted; picking `neat_config_selfplay_v4.txt`'s deletion
+rates back up somewhat (between v2's 0.2/0.1 and v4's 0.05/0.02) plus
+one of the bloat controls above is the likely next move.
+
+## Interim stopping point after run 4 (2026-09-14, superseded)
+
+Four approaches tried up to this point (raw single-rollout fitness,
 averaged-rollout fitness, survival-bonus reward shaping, and a 172-round
-self-play curriculum), all ending at the same wall: 0 wins out of 100
+self-play curriculum) all ended at the same wall: 0 wins out of 100
 against `BaselinePolicy`, indistinguishable from random play. The
-common thread across every run is that `BaselinePolicy` gives no usable
+common thread across every run was that `BaselinePolicy` gives no usable
 fitness gradient to any policy below some skill threshold that none of
 these runs reached, and that 1000 generations / pop_size 128 of
 feedforward-only NEAT is a small budget compared to what other methods
 in this repo needed (`train_ppo_selfplay.py` alone runs for 1e9
-timesteps). Stopping here rather than continuing to iterate; the
-"next-step ideas" above are recorded for whoever picks this back up,
-roughly in priority order (longer self-play budget first).
+timesteps).
+
+This was treated as a stopping point at the time, but the user decided
+to continue with an explicit goal (actually beat `BaselinePolicy`) —
+see run 5 above, which found and partially fixed a much more specific
+problem (self-play converging to input-blind fixed actions) before
+running into the bloat issue described there. Left in place for the
+history; the *current* stopping point is the end of the run 5 section
+above.
+
+Stopped run 5's 5000-generation attempt at generation ~800 after
+confirming its champion had regressed to zero functional input-to-output
+paths (node bloat, not a connectivity-loss problem this time).
+
+## Run 5, v5 — deletion rates between v2 and v4, plus a parsimony penalty
+
+Retuned `conn_delete_prob` 0.05→0.1, `node_delete_prob` 0.02→0.05,
+`node_add_prob` 0.2→0.1, and added `complexity_penalty = 0.01` per node
+directly in `eval_genomes`'s fitness calculation (`neat_run5d`, 100-gen
+trial). Also added `connectivity_report()` (node/connection counts + how
+many of the 12 inputs have an enabled path to an output), printed on
+every dethroning from then on, so this class of regression shows up in
+the log instead of requiring manual inspection each time.
+
+Result: no bloat (nodes stayed 3-7 throughout), but connectivity
+oscillated between 2/12 and 7/12 without a clear upward trend — final
+`best.pkl` had only 4/12 inputs working. Scaled to a real 5000-gen run
+(`neat_run5_full_v5`) anyway; at generation ~800 (1.5h in) it was still
+oscillating in the same 2-5/12 range with no bloat, but also no growth,
+and the population had collapsed to 1 species (discussed with the user
+and accepted as non-fatal, since `species_elitism=2` protecting a lone
+species from stagnation-culling doesn't by itself stop fitness
+progress). **Stopped by user choice** ("一旦止めて、parsimonyペナルティ
+を外してみよう") to try removing the penalty, but the conversation
+turned to a more informative comparison first (below) before
+re-launching.
+
+## Comparison against this repo's own pretrained self-play model
+
+Before iterating further, checked whether self-play can work in this
+environment at all, using ground truth already in the repo:
+`zoo/ga_sp/ga.json`, produced by `train_ga_selfplay.py`, loaded via
+`slimevolleygym.mlp.makeSlimePolicyLite`. Evaluated over 100 episodes vs
+`BaselinePolicy`:
+
+```
+mean score: 0.23 (std 0.73)
+wins/draws/losses: 29/61/10
+```
+
+**This actually beats BaselinePolicy** — confirming self-play itself is
+a viable approach here; every NEAT run so far (1-5) had failed only to
+match random play, nowhere close to this. The key structural difference:
+`train_ga_selfplay.py` uses a **fixed topology** (12→10→10→3 tanh MLP,
+273 params, from `slimevolleygym/mlp.py`'s `games['slimevolleylite']`)
+and evolves only weights via mutation, plus a very different self-play
+protocol — continuous random-pair tournaments across the whole
+population (500,000 of them), rather than a single evolving "champion"
+gated by a dethroning check.
+
+This reframed the working hypothesis: NEAT's defining "start minimal,
+grow topology as needed" approach (`num_hidden=0`) may itself be the
+main obstacle — building a working multi-layer pathway one node/
+connection at a time via mutation is slow and fragile, which matches
+every failure mode seen in runs 4-5 (lost pathways, dead ends, bloat).
+The user's constraint: NEAT is required for this project (a from-scratch
+NumPy NEAT reimplementation is planned next, see memory), so switching
+to plain GA was explicitly rejected — the fixes below stay within NEAT.
+
+## Run 6 — start with real hidden-layer capacity (`num_hidden=10`)
+
+Departs from NEAT's usual "start minimal" practice on purpose: config
+`neat_config_selfplay_v6.txt` sets `num_hidden=10`,
+`initial_connection=full_nodirect` (input→hidden→output, no direct
+input-output edges, matching the layered MLP shape above),
+`complexity_penalty` removed (10 baseline hidden nodes are necessary
+capacity, not bloat). First attempt crashed immediately —
+`compatibility_threshold=3.0` (tuned for the old 36-connection genomes)
+was far too tight for the new 150-connection genomes: measured pairwise
+genetic distance among a freshly initialized population averaged ~3.6,
+so nearly every genome became its own species and reproduction couldn't
+satisfy `pop_size >= num_species * min_species_size`. Fixed by raising
+`compatibility_threshold` to 6.0 (verified empirically: gen-0 population
+formed 1 species at this threshold).
+
+100-generation trial (`neat_run6`) result: **12/12 inputs reached an
+output for the first ~13 dethronings** — clearly better than any
+previous run's start. But by generation 100 it had collapsed back to
+0/12 (final `best.pkl`: 16 nodes, 11 enabled connections, 0/12 working).
+`num_hidden=10` alone wasn't enough to hold onto working connectivity
+over time.
+
+## Run 7 — broader (multi-opponent) dethroning check
+
+Root-caused run 6's late collapse: `maybe_add_champion` only tested a
+challenger against the single most recent champion. A genome could join
+the archive by exploiting that one specific opponent's blind spot
+without being generally competent — the same failure GA self-play
+avoids by having random population pairs play continuously rather than
+gating entry into one lineage. Fix: `maybe_add_champion` now samples up
+to 4 opponents from across the whole archive and requires beating that
+broader sample on average, at the same total rollout budget (4 opponents
+× 5 rollouts instead of 1 opponent × 20).
+
+100-gen trial (`neat_run7`) result: ended at **7/12** working inputs
+(`bx` and the agent's own `x` both present) — better than run 6's 0/12,
+though a direct sweep showed `bx`'s effect on the output was very weak
+in the normal input range (only visible at an extreme, unrealistic
+value). On screen, the user still couldn't see left-right reaction
+("感じられなかったな"), consistent with that measurement. Judged as a
+"weights need more time to strengthen an existing pathway" problem
+rather than a structural one, and scaled to a 5000-generation run
+(`neat_run7_full`).
+
+**The long run regressed anyway.** By generation ~20 connectivity had
+already started falling from 10-12/12, and generations 23-68 sat at
+0-2/12 while node count climbed steadily to 23-31 with enabled
+connections falling to 6-20 — bloat, the exact run-5-v4 failure mode,
+just starting from `num_hidden=10`'s higher floor instead of 0. Cause:
+`complexity_penalty` had been removed for run 6 (under the reasoning
+that the num_hidden=10 baseline wasn't "bloat") and was never
+reinstated for run 7's dethroning-check fix, so nothing was left to
+resist unbounded growth *beyond* that baseline. **Stopped again** by
+user choice ("そうしてみて" — reinstate the parsimony penalty).
+
+## Run 8 — all three fixes combined
+
+`num_hidden=10` (run 6) + broader archive-sampled dethroning (run 7) +
+`complexity_penalty=0.01` reinstated (run 5v5), all at once instead of
+one at a time. 100-gen trial (`neat_run8`) result: nodes stayed in a
+healthy 7-16 range throughout (no bloat), connectivity eased from 12/12
+down to 4/12 by generation 18 but never collapsed to 0 — the best
+outcome of any 100-gen trial so far, balancing all three previous
+failure modes reasonably well. Scaled to a 5000-generation run
+(`neat_run8_full`), currently in progress.
+
+## Run 8, full 5000-gen attempt — bloat control worked, but pruned bx/x entirely
+
+`neat_run8_full` avoided bloat (nodes settled to a tiny 3-7 throughout,
+no runaway growth) but by generation ~190 the parsimony penalty had
+pruned away **both** `bx` and the agent's own `x` completely — the
+network could no longer sense horizontal position at all. Confirmed on
+screen: user watching `champion_0192.pkl` play reported "ずっと真ん中の
+壁に張り付いてる" (stuck against the middle wall the whole time), which
+a direct connectivity check matched exactly (`working inputs: ['by',
+'vx', 'vy']` — no `bx`, no `x`). **Stopped.**
+
+## Run 9 — repair protected inputs directly instead of hoping they survive
+
+Rather than continue re-tuning delete/penalty rates and hoping `bx`/`x`
+happen to survive, added `repair_protected_inputs()`: every generation,
+for each of `bx` and the agent's own `x`, if no enabled path to *any*
+output exists, force-create/re-enable a direct connection to output 0.
+Verified in isolation first (unit test: delete `bx`/`x` connections from
+a genome, call the repair, confirm they're back) before running.
+
+100-gen trial (`neat_run9`) looked great by the earlier connectivity
+metric and even showed a clean bx sweep (`action` correctly flips
+forward/backward around the ball's position). But tracking the
+candidate's actual x position over a real rollout told a different
+story: **509 of 600 steps (85%) were spent within 1 unit of the net** —
+it drove straight to the net and got stuck, exactly matching what the
+user reported ("ずっと真ん中の壁に張り付いてる...一度もボールに触ってない").
+Diagnosis: the repair guaranteed *some* path to *an* output, but nothing
+required *both* forward (output 0) and backward (output 1) to be
+reachable — the genome's `backward` output turned out to be constant
+regardless of `bx`, so the agent could approach the net but never
+retreat.
+
+## Run 9b — protect both forward and backward outputs specifically
+
+Generalized `has_path_to_output` into `has_path_to_node(start, target,
+...)` and changed `repair_protected_inputs` to require each protected
+input reach **both** output 0 (forward) and output 1 (backward)
+individually, not just "an" output. Verified with a unit test again.
+
+100-gen trial (`neat_run9b`) fixed the net-freeze — the bx sweep now
+correctly flipped forward/backward — but the champion instead froze at
+the *opposite* wall (`x` from -12.58 to -22.5, then stuck; 0/600 steps
+near the net). Tracing the actual observations during play revealed the
+real bug: the network was firing **forward=1 AND backward=1
+simultaneously**. `Agent.setAction` (`slimevolley.py:383-386`) treats
+that combination as "stand still" (`desired_vx` stays at its default of
+0 unless exactly one of forward/backward is true) — so two
+independently-guaranteed-reachable outputs could both fire at once and
+silently cancel each other out. Guaranteeing reachability wasn't the
+same as guaranteeing mutually-exclusive activation.
+
+## Fix: break forward/backward ties in `NeatPolicy.predict()`
+
+Rather than trying to force opposite-signed weights during training
+(which wouldn't stop *other*, non-protected connections from also
+pushing both outputs high), fixed this at the policy layer in
+`slimevolleygym/neat_policy.py`: when both `forward` and `backward`
+threshold past 0.5, keep whichever raw sigmoid output is larger instead
+of letting the game interpret both as "stand still". This fixes the
+issue for *any* genome, not just ones built by the training-time repair.
+Verified immediately against run 9b's already-frozen `best.pkl` *without
+retraining* — same genome, x now moved between -22.5 and -2.0 instead of
+being stuck at one wall.
+
+## Run 10 — retrain with the tie-break fix
+
+100-gen trial (`neat_run10`) result: fitness spiked to 3.60 at one point
+(highest ever), and the final `best.pkl` genuinely moved back and forth
+(x ranged -11.4 to -3.8, no permanent freeze) with corr(agent_x,
+ball_x) = -0.76, but **zero ball touches** in a 600-step rollout, and
+the user described the motion as "振動してるだけ" (just oscillating) once
+watched on screen — plausibly driven by other connected inputs (by,
+vx, vy) rather than genuine `bx`-based tracking. Judged as a
+structurally-sound-but-still-unskilled network (a normal "needs more
+training time" problem) rather than a new structural bug, since every
+previously-discovered failure mode (lost pathways, bloat, freezing) was
+now absent.
+
+## Run 11 — scaled to 5000 generations, with per-100-generation check-ins
+
+Same `train_neat.py` setup as run 10 (`neat_config_selfplay_v6.txt`,
+`complexity_penalty=0.01`, multi-opponent dethroning, protected-input
+repair for both forward/backward, tie-break fix in `NeatPolicy`),
+launched as `neat_run11_full`. Added `training_scripts/analyze_champion.py`
+as a reusable tool for periodic checkpoints: connectivity report + an
+actual rollout vs `TrackingPolicy` with ball-touch count and
+agent-x/ball-x correlation, with `--render` to watch on screen. A
+background monitor emits an event every ~100 generations so each
+milestone's latest champion gets checked without manual polling.
+
+### Two more bugs found and fixed in `analyze_champion.py` itself (not training)
+
+1. **Reward sign confusion.** The script initially placed the candidate
+   as `policy_left` (matching training's convention) and printed the
+   raw `env.step()` reward, which is documented and coded
+   (`slimevolley.py:583`, `:588`) as *right-side* perspective. A
+   negative value therefore meant the *left* side (the candidate) won,
+   not lost — misread out loud as the opposite once ("TrackingPolicy側
+   の勝ち"), caught by the user. Fixed properly by swapping the
+   candidate onto `policy_right` (the env's own default "self" side)
+   so the printed score is directly the candidate's own perspective,
+   no mental sign-flip needed. Verified the training code itself
+   (`eval_genomes`, `maybe_add_champion` in `train_neat.py`) was never
+   affected — both already correctly negate the right-side `rollout()`
+   score to get the *left-side* candidate's perspective there, since
+   training always plays the candidate on the left against the archive.
+2. **Ball-touch undercounting.** Checking `ball.isColliding(agent_right)`
+   *after* `env.step()` returns is too late — the internal collision
+   check and bounce already happened inside `Game.step()`, so the ball
+   has already moved away by the time the script checks (reported 0
+   touches when the user counted 10+ on screen). Fixed by wrapping
+   `ball.bounce()` directly, which is called the instant a collision is
+   detected. That undercounted too (2 instead of 10+) because
+   `Game.newMatch()` (called on every scored point) replaces
+   `self.ball` with a brand-new `Particle`, silently dropping the
+   wrapped method — fixed by also wrapping `newMatch()` to re-wrap the
+   fresh ball's `bounce()` each time. Final count (5) matched the user's
+   own on-screen count exactly.
+
+### First genuinely competent-looking result
+
+At generation ~280 (35th dethroning), `champion_0035.pkl`: **16 ball
+touches**, score +5 (candidate perspective, candidate on the right),
+corr(agent_x, ball_x) = 0.889, over an 829-step rollout vs
+`TrackingPolicy`. Confirmed on screen — first time in 11 runs the
+candidate visibly and repeatedly tracks and returns the ball rather than
+freezing, oscillating aimlessly, or winning only via the opponent's own
+mistakes. User: "ブラボーめっちゃいいじゃない".
+
+champion_0035 was also tried against two more opponents, on screen:
+
+- **champion_0034** (its own immediate self-play predecessor): champion
+  0035 won +4 over 1516 steps, both genomes visibly rallying the ball
+  back and forth. User: "動いてる、両方ともちゃんと打ち返してる。感動".
+- **`BaselinePolicy`** (the actual stated goal): ran the full 3000-step
+  limit, candidate lost by just **-1**, with **72 ball touches** — by far
+  the longest, most competitive match of the whole project (runs 1-4
+  never touched the ball at all against `BaselinePolicy`).
+- **`zoo/ga_sp/ga.json`** (this repo's own GA self-play model, used
+  earlier as external validation that self-play works here at all):
+  candidate lost -5 over 2282 steps but with 36 ball touches — a real
+  rally, just not yet winning. User: "動きは悪くないけど、反応が少し遅い
+  のかもね".
+
+Given champion_0035 was now clearly in the right regime (competitive
+with `BaselinePolicy`, not just with its own weak self-play seed), asked
+whether to keep pure self-play going or start mixing in stronger fixed
+opponents. User confirmed external opponents can never become a
+"champion" themselves (they have no genome) — they only enrich the
+opponent pool used for fitness/dethroning; only NEAT genomes evolved by
+the population get crowned.
+
+## Run 12 — mixed opponent pool, seeded from champion_0035
+
+Copied `train_neat.py` to `train_neat_run12.py` (kept as a separate file
+specifically so run 11 could keep running unaffected on the original
+script — editing a `.py` file on disk does not affect an already-running
+process, but keeping them as distinct files avoids any confusion about
+which script produced which run). Two changes from run 11:
+
+1. `OpponentArchive` split into `permanent` (never evicted: the
+   `TrackingPolicy` seed + this repo's zoo models) and `rotating` (self-
+   play champions, capped as before). External models added, each
+   pre-checked vs `BaselinePolicy` over 20 episodes: `cmaes_sp` (mean
+   -0.15, slightly weaker than baseline), `ga_sp` (+0.23), `cmaes`
+   (+1.00, solidly stronger), plus `BaselinePolicy` itself.
+2. `seed_population()` initializes generation 0 from 128 mutated copies
+   of `champion_0035` (via `reproduction.genome_indexer` for fresh keys
+   + `genome.mutate()`), instead of NEAT's usual fresh-random-genomes
+   start, via `population.population = {...}` followed by
+   `population.species.speciate(...)`. The point was "given a genome
+   that can already rally, does training against tougher opponents push
+   it further" — not re-deriving basic competence from scratch.
+
+### Result: regression, not improvement
+
+100-generation trial (`neat_run12`): **zero dethronings** — no
+challenger ever beat a sampled set of (mostly permanent-pool) opponents
+by the same `dethrone_margin=0.5` that self-play alone cleared 13-35
+times per 100 generations. Population fitness stayed solidly negative
+throughout (best usually 1-3, mean around -3.2). More importantly, the
+population's actual best genome after 100 generations
+(`neat_run12/best.pkl`) had **regressed sharply from the champion_0035
+seed**: 1 ball touch and corr(agent_x, ball_x) = -0.191 vs
+`TrackingPolicy`, compared to champion_0035's 16 touches and corr 0.889
+under the same test. Mixing in tough fixed opponents (particularly
+`cmaes` at +1.00 vs `BaselinePolicy`) from the very first generation
+made the fitness landscape uniformly harsh enough that useful mutations
+couldn't be distinguished from harmful ones within 100 generations —
+the opposite of the intended "harder curriculum" effect. **Paused** by
+user choice; not scaled to a full run.
+
+Run 12's mixed-opponent-pool direction is shelved for now (candidate
+follow-up if revisited: ease in gradually -- e.g. drop `cmaes` initially
+and/or lower `dethrone_margin` -- rather than the full harsh pool from
+generation 0).
+
+## Diagnosing run 11's real problem: declining fitness, not a strong champion
+
+By generation ~700, `neat_run11_full` still hadn't dethroned
+champion_0035 (from ~gen 280) after 400+ generations. Sampling "Best
+fitness" every 50 generations across the whole run showed a clear
+**downward trend**, not a plateau: early values 2.92/3.30/2.64/2.28/3.64
+vs. later values -0.70/0.30/-1.03/-0.03/1.29/-0.03/-1.36/0.95/-0.74/-1.70.
+A genuinely strong, stable champion would produce a plateau; a declining
+trend across hundreds of generations means the population itself was
+getting *worse* over time -- classic genetic drift. Root cause:
+`species_elitism=2` makes a lone species immune to stagnation-culling
+(discussed and accepted as "not fatal on its own" back in run 4/8), but
+over 467+ generations in a single species, real harm compounds: no niche
+protection for novel structural experiments, and no cross-species
+comparison to catch quality decline. Measured the live population's
+actual pairwise genetic distance directly from `checkpoint-770`: mean
+1.43, max 2.30 -- the `compatibility_threshold=6.0` in place (calibrated
+for run 6's freshly-initialized, much less differentiated population)
+could never have split this population into multiple species.
+
+## Run 13 — resume with a recalibrated speciation threshold
+
+Rather than restart from scratch, resumed run 11's actual
+`checkpoint-770` (the real population, just undiversified) via
+`neat.Checkpointer.restore_checkpoint(path, new_config=...)`, using
+`neat_config_selfplay_v7.txt` (`compatibility_threshold` 6.0 -> 1.6,
+empirically retested against that same checkpoint: 1.2 -> 30 species/too
+fragmented, 1.6 -> 9 species sizes 2-42/reasonable, 1.8 -> 6, 2.0 -> 2,
+2.2 -> 1). Also reconstructed the self-play archive as it would have
+looked at that point by loading run 11's actual last 9 champion files
+(`OpponentArchive.resume_from()`) instead of restarting the archive from
+just the `TrackingPolicy` seed.
+
+**First attempt still produced only 1 species after "re-speciating".**
+Cause: `restore_checkpoint` brings back the OLD `species` object intact,
+and NEAT's `speciate()` only compares new genomes against *existing*
+species' representative genomes, opening a new species only when a
+genome matches none of them -- reusing that stale single-species object
+(with its one old representative) meant most genomes still nominally
+"matched" it even under the new threshold, unlike a from-scratch
+clustering. Fixed by replacing `population.species` with a brand-new,
+empty `neat.DefaultSpeciesSet` right before calling `.speciate()` --
+exactly mirroring how the threshold was calibrated/tested beforehand.
+This produced the expected 9 species immediately.
+
+## Current status (2026-09-15)
+
+`neat_run13_full` is running (resumed from run 11's generation 770,
+`neat_config_selfplay_v7.txt`, 9 species, archive reloaded with the last
+9 real champions), targeting generation 5000 total
+(`n_generations=4230` more). Automatic ~100-generation milestone
+check-ins continue via a background monitor (now also reporting species
+count each time). Not yet evaluated against `BaselinePolicy` with a full
+100-episode `eval_neat.py` readout (only single on-screen matches so
+far, all against `TrackingPolicy`/`champion_0034`/`BaselinePolicy`/
+`ga_sp` using champion_0035) — that remains the next step once run 13
+finishes or plateaus clearly.
