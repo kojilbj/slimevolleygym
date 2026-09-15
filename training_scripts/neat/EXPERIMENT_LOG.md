@@ -796,15 +796,71 @@ empty `neat.DefaultSpeciesSet` right before calling `.speciate()` --
 exactly mirroring how the threshold was calibrated/tested beforehand.
 This produced the expected 9 species immediately.
 
+`neat_run13_full` ran for ~1250 generations (770 -> 2021) without
+declining, unlike run 11 -- confirmed healthy: "Best fitness" sampled
+every 40 generations stayed in a positive, non-trending range (roughly
+-1.05 to 3.6), with the best genome coming from a constantly-changing
+mix of species numbers rather than one dominant lineage. Champion_0038
+(promoted early in this stretch, ~generation 902) still hadn't been
+dethroned after 1000+ generations, though -- worth checking why.
+
+## Diagnosing the champion_0038 plateau: still measurement noise
+
+Pulled the actual best genome from a late checkpoint (`checkpoint-1971`,
+generation-local fitness 1.94 -- looked close to competitive) and
+re-tested it under the *exact* dethroning-check conditions (4 sampled
+archive opponents x 5 rollouts = 20 total, same as
+`maybe_add_champion`): scored **-3.9**, nowhere close to champion_0038.
+The per-generation fitness NEAT itself selects on is still averaged over
+only `n_rollouts=3` -- the same noise problem diagnosed all the way back
+in runs 1-2, which never fully went away once self-play made
+per-opponent variance an *additional* source of noise on top of
+per-episode variance. On-screen, a mirror match (champion_0038 vs.
+itself) went the full 3000-step limit at a 1-point margin -- about as
+close to a coin flip as this environment's asymmetries allow, which is
+a reasonable sanity check that the genome itself isn't degenerate, just
+that 3-rollout fitness isn't discriminating enough anymore.
+
+## Run 14 — reduce fitness noise, and a neat-python resume bug
+
+Resumed run 13 from its generation-2021 checkpoint (again not from
+scratch) with `n_rollouts` raised 3 -> 6, and the self-play archive
+reconstructed across *both* run 11's and run 13's champion files (they
+went to different `logdir`s: run 11's champions 1-35 are in
+`neat_run11_full/`, run 13's 36-38 are in `neat_run13_full/` --
+`OpponentArchive.resume_from()` generalized to search a list of
+directories, sorted together since the run-number ordering happens to
+sort correctly lexicographically here: "neat_run11_full" < "neat_run13_full").
+
+**First attempt crashed 3 generations in** with `AssertionError` in
+neat-python's `get_new_node_key` (`neat/genome.py:122`): a structural
+mutation tried to assign a new hidden-node ID that already existed.
+Root cause: `config.genome_config.node_indexer` (the counter that hands
+out new node IDs) is a plain Python `count()` on the `GenomeConfig`
+object -- it is **not** part of the innovation tracker that
+`restore_checkpoint` explicitly preserves, and it lazily initializes
+from `max(node_dict) + 1` of whichever genome happens to be mutated
+*first* after a resume, not the true maximum across the whole
+population. After chaining two resumes (run 11 -> 13 -> 14), the
+genome mutated first apparently had a lower max node ID than others
+elsewhere in the population, so the indexer started too low and
+collided with an ID already in use elsewhere. Fixed by explicitly
+setting `config.genome_config.node_indexer =
+itertools.count(max_node_id_across_whole_population + 1)` right after
+restoring the checkpoint and before calling `population.run()`. Worth
+remembering for any future resume, not just chained ones -- this could
+in principle happen on a *first* resume too, given the right population
+state; run 13 simply didn't hit it by luck.
+
 ## Current status (2026-09-15)
 
-`neat_run13_full` is running (resumed from run 11's generation 770,
-`neat_config_selfplay_v7.txt`, 9 species, archive reloaded with the last
-9 real champions), targeting generation 5000 total
-(`n_generations=4230` more). Automatic ~100-generation milestone
-check-ins continue via a background monitor (now also reporting species
-count each time). Not yet evaluated against `BaselinePolicy` with a full
-100-episode `eval_neat.py` readout (only single on-screen matches so
-far, all against `TrackingPolicy`/`champion_0034`/`BaselinePolicy`/
-`ga_sp` using champion_0035) — that remains the next step once run 13
-finishes or plateaus clearly.
+`neat_run14_full` is running (resumed from run 13's generation 2021,
+same `neat_config_selfplay_v7.txt`, `n_rollouts=6`, archive reloaded
+with the last 9 of 38 real champions across both prior runs' logdirs),
+targeting generation 5000 total (`n_generations=2979` more). Automatic
+~100-generation milestone check-ins continue via a background monitor.
+Not yet evaluated against `BaselinePolicy` with a full 100-episode
+`eval_neat.py` readout (only single on-screen matches so far, against
+`TrackingPolicy`/`champion_0034`/`champion_0035`(mirror)/`BaselinePolicy`/
+`ga_sp`, using champion_0035 and champion_0038) — that remains the next
+step once run 14 finishes or plateaus clearly.
