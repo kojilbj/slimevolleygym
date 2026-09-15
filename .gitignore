@@ -4,14 +4,10 @@ __pycache__/
 *.pyc
 
 # NEAT training run artifacts (checkpoints, per-generation pickles, logs) --
-# large and reproducible by re-running training_scripts/train_neat.py.
+# large and reproducible by re-running training_scripts/train_neat*.py.
 # Keep the experiment log though.
 training_scripts/neat/*
 !training_scripts/neat/EXPERIMENT_LOG.md
-training_scripts/neat_run2/
-training_scripts/neat_run3/
-training_scripts/neat_run4/
+training_scripts/neat_run*/
 training_scripts/neat_train.log
-training_scripts/neat_run2_train.log
-training_scripts/neat_run3_train.log
-training_scripts/neat_run4_train.log
+training_scripts/neat_run*_train.log
