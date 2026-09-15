@@ -1047,14 +1047,80 @@ again) with the fixed config, and reconstructed the archive from run
 them. Confirmed the run survives well past generation 14, the point
 where the previous attempt died.
 
+## Run 19 result
+
+`neat_run19_full` ran stably from generation 10 through 121 with no
+further crashes, producing champions up through 0037 and higher.
+On-screen review found ball-tracking is now clearly good on both champions
+tested (0035, 0037), but matches still look indecisive: the agent often
+needs many touches to actually get the ball back over the net rather than
+returning it in one or two clean hits. User's own framing: "今はボールは
+めちゃくちゃ追えてるからあとは一回ボールを打ち返すための接触回数を減らして
+より攻撃的にするほうがいいと思う" (ball-tracking is great now, next is
+reducing touches-per-return to play more aggressively).
+
+Measured touches-per-point-won directly with `analyze_champion.py`
+against an archive-sampled opponent, as a baseline before adding any
+penalty: champion_0035 averaged 1.41 touches per point won, champion_0037
+averaged 2.69 — i.e. 0037 tracks the ball better on paper but is actually
+*less* decisive than 0035 once it has to close out a point, exactly the
+failure mode the user flagged.
+
+## Run 20 — decisiveness penalty (touches-per-point-won)
+
+Added a fitness penalty for needing many ball touches to win a point,
+measured only over points the candidate actually *wins* — a genome that
+disengages from the ball to avoid touching it will simply stop winning
+points and get zero reward from this term, so it can't be gamed by
+passivity the way a raw "fewer touches" signal could be.
+
+Implementation in `train_neat_run20.py`:
+- `rollout_with_stats()` extends the normal rollout to also track, per
+  episode: total ball touches, points won, and touches accumulated only
+  during point-won rallies (reset to 0 every time a point changes hands).
+  Touch counting reuses the same `ball.bounce()` wrap (and rewrap on every
+  `Game.newMatch()`) that `analyze_champion.py` already validated against
+  the user's own on-screen counts.
+- `eval_genomes()` sums `touches_in_won_points` and `points_won` across
+  all of a genome's rollouts against sampled archive opponents, and when
+  `points_won > 0` subtracts `decisiveness_penalty * (touches_in_won_points
+  / points_won)` from fitness. Genomes that never win a point (still
+  common early after a restart) are unaffected by this term, so it can't
+  interfere with the existing survival/ball-touch/movement gates.
+- `decisiveness_penalty = 0.2`, chosen to be noticeable relative to the
+  existing fitness scale (rollout scores of roughly -5 to +5) without
+  dominating it outright, given the measured baseline range (1.4-2.7
+  touches/win) — worth revisiting once real data comes in from a run
+  that's actually selecting on this term.
+
+Also fixed a numbering bug in `OpponentArchive.resume_from()`: it set
+`self.generation = len(champion_files)` (a *count* of champion files
+found on disk), not the actual highest champion number, so resuming from
+a `resume_logdirs` list that didn't include every prior run directory
+would silently restart numbering low and produce confusing champion
+IDs (spotted by the user asking "今のchampは何番？" and getting a lower
+number than expected). Fixed by parsing the real number out of each
+filename via `re.search(r"champion_(\d+)\.pkl$", f)` and taking `max()`
+across all of them.
+
+`neat_run20_full` resumes from run 19's `checkpoint-121`
+(`neat_config_selfplay_v9.txt`, unchanged), with the archive rebuilt from
+run 18 + run 19's champions plus champion_0035 explicitly reintroduced.
+Verified: resumed cleanly (28 species re-speciated at
+`compatibility_threshold=1.2`, `node_indexer` correctly continued from
+the max node id across the restored population), and ran well past the
+generation-121 resume point with no traceback, with the existing
+ball-touch and movement-std gates still visibly rejecting bad challengers
+during the run.
+
 ## Current status (2026-09-15)
 
-`neat_run19_full` is running (resumed from run 18's generation 10,
-`neat_config_selfplay_v9.txt`, archive = last 9 of run 18's own
-champions + champion_0035, all of run 15-17's gates active), targeting
-generation 3000 total for this champion_0035-seeded lineage
-(`n_generations=2990` more). Automatic ~100-generation milestone
-check-ins continue via a background monitor. Not yet evaluated against
-`BaselinePolicy` with a full 100-episode `eval_neat.py` readout — that
-remains the next step once a new champion clearly and repeatedly beats
-champion_0035, or the run plateaus clearly.
+`neat_run20_full` is running (resumed from run 19's generation 121,
+`neat_config_selfplay_v9.txt`, decisiveness penalty active, archive =
+run 18 + run 19 champions + champion_0035), targeting generation 3000
+total for this champion_0035-seeded lineage (`n_generations=2884` more).
+Automatic ~100-generation milestone check-ins continue via a background
+monitor. Not yet evaluated against `BaselinePolicy` with a full
+100-episode `eval_neat.py` readout — that remains the next step once a
+new champion clearly and repeatedly beats champion_0035 with visibly
+fewer touches per point, or the run plateaus clearly.
