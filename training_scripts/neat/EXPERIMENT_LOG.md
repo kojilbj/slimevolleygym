@@ -932,14 +932,90 @@ appended to the archive on top of the normal reload (`archive size now
 rather than replacing a normal rotation slot; natural rotation will
 prune from the front over time as usual).
 
+`neat_run16_full` produced **champion_0041** (10/12 inputs working, 14
+touches, corr 0.853 vs `TrackingPolicy`) -- a genuine improvement,
+drawing 0-0 with champion_0035 over the full 3000-step limit, though
+still losing -5 to `BaselinePolicy` (35 touches). It then produced
+**champion_0042**, which the user immediately flagged: "接触1回とか論外
+だよ" -- only 1 ball touch in a match, moving in a way anti-correlated
+with the ball (corr -0.788). champion_0042 had cleared the movement-std
+gate (it does move) but never actually played the ball.
+
+## Run 17 — also gate on ball touches, not just movement
+
+User: "接触回数も閾値を用意して除外したほうがいいんじゃない？" Extended
+`measure_movement_std` into `measure_behavior()`, returning both x-stdev
+and ball-touch count from the same rollout (no extra cost), averaged
+over `n_behavior_checks=3` rollouts (a single rollout's touch count is
+noisy) before crowning.
+
+Picking the threshold took two tries. First cut (`min_avg_touches=1.5`)
+was checked only against `TrackingPolicy` as the opponent and
+immediately criticized by the user ("接触回数は閾値もっとあげなきゃ意味
+なくない？") -- rightly: under that specific test, known-*good*
+champion_0038 averaged exactly 1.40 touches, statistically
+indistinguishable from known-*bad* champion_0042's 1.40. Recalibrated
+against **archive-sampled opponents** (matching what the gate actually
+uses, not just the weak scripted seed): champions 0035/0038/0041 (good)
+averaged 4.2-8.2 touches; 0040/0042 (bad) averaged 0.4-1.4 -- a clean
+gap. Set `min_avg_touches=2.5`. Resumed run 16 from its generation-2704
+checkpoint; within the next ~40 generations this gate alone rejected 11
+challengers (alongside 28 more for the movement check).
+
+## Testing champion_0035 against the current champion, three times
+
+With the stricter gates in place but no new champion yet dethroning
+champion_0042, direct on-screen matches (3 different seeds) settled the
+question conclusively: **champion_0035 won all three, -4/-5/-5.**
+champion_0042 was never a real threat -- it just happened to clear
+whatever the archive's current 4-opponent sample was at the time.
+
+## Run 18 — restart the population from champion_0035
+
+User: "つまり王座は35の状態からやり直したほうがいいってことだよね？" The
+*population* had been evolving since champion_0035 was crowned
+(~generation 902) and, per run 17's own gates rejecting dozens of
+challengers, appears to have spent much of that time producing genomes
+weaker than 0035, not stronger. Rather than keep training a population
+that may be broadly drifted, this seeds a **fresh population of 128
+mutated copies of champion_0035** (mirroring run 12's `seed_population()`,
+but deliberately *without* run 12's other change -- no harsh external
+opponent pool from generation 0, keeping this a clean single-variable
+test of "does restarting from a strong genome help"). Archive reset to
+just `[TrackingPolicy, champion_0035]`, not the weaker 36-42 lineage.
+Run 15-17's movement and ball-touch gates stay in place.
+
+Needed a new config (`neat_config_selfplay_v8.txt`): pairwise genetic
+distance among 128 mutated copies of one small genome averages only
+~0.67 (max ~1.2) -- far below v7's `compatibility_threshold=1.6`
+(calibrated for a very different, larger population in run 13), which
+would have collapsed this population into 1 species immediately, the
+same mistake already made and fixed once in run 6/13. Retested
+empirically on this specific seeded population: 0.3 -> 94 species (too
+fragmented), 0.5 -> 27, 0.7 -> 8 (a large ~118-member species plus a
+handful of small ones -- reasonable), 1.0 -> 1. Picked 0.7. Also
+generalized the `node_indexer` safety fix (previously applied only
+after a checkpoint restore) to always run after any population
+manipulation, since the seeding loop's per-copy `mutate()` calls can
+poison it the same way a resume can.
+
+Generation 0 alone produced two dethronings (champion_0043, 0044) --
+starting from a strong, low-diversity population lets *small* mutations
+matter immediately, unlike starting from scratch. Generation time is
+noticeably higher (~13s vs run 17's ~10s) since near-identical genomes
+playing each other tend toward longer, closer matches. Species count
+spiked to 33-45 (mostly singletons) despite the recalibrated threshold
+-- worth watching, but not adjusted yet.
+
 ## Current status (2026-09-15)
 
-`neat_run16_full` is running (resumed from run 15's generation 2613,
-same config/gates, archive = last 9 of 40 real champions +
-champion_0035 manually reintroduced), targeting generation 5000 total
-(`n_generations=2387` more). Automatic ~100-generation milestone
-check-ins continue via a background monitor. Not yet evaluated against
-`BaselinePolicy` with a full 100-episode `eval_neat.py` readout (only
-single on-screen matches so far) — that remains the next step once
-run 16 finishes, produces a champion that clearly beats champion_0035,
-or plateaus clearly.
+`neat_run18_full` is running (fresh population seeded from
+champion_0035, `neat_config_selfplay_v8.txt`, archive =
+`[TrackingPolicy, champion_0035]`, all of run 15-17's gates active),
+targeting `n_generations=3000` from a fresh generation-0 start (not tied
+to prior runs' generation counts; new champions continue the global
+numbering from 43). Automatic ~100-generation milestone check-ins
+continue via a background monitor. Not yet evaluated against
+`BaselinePolicy` with a full 100-episode `eval_neat.py` readout — that
+remains the next step once a new champion clearly and repeatedly beats
+champion_0035, or the run plateaus clearly.
